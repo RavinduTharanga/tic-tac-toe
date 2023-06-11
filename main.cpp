@@ -1,33 +1,30 @@
-//Tic Tac Toe Game in C++
-
-//Importing the inbuild libraries in CPP
 #include <iostream>
 #include <stdlib.h>
 using namespace std;
-//Array for the board
-char board[3][3] = {{'1','2','3'},{'4','5','6'},{'7','8','9'}};
-//Variable Declaration
-int choice;
-int row,column;
-char turn = 'X';
-bool draw = false;
 
-//Function to show the current status of the gaming board
+char board[3][3] = {{'1','2','3'},{'4','5','6'},{'7','8','9'}};
+int choice,row,column;
+char turn = 'x';
+
+bool draw = false;
 
 void display_board(){
 
-    //Rander Game Board LAYOUT
+    cout<<"PLAYER - 1 [X]t PLAYER - 2 [O]\n";
+    cout<<"     |     |     \n";
+    cout<<" "<<board[0][0]<<"   | " <<board[0][1]<<"   |  "<<board[0][2]<<"\n";
+    cout<<"_____|_____|_____\n";
+    cout<<"     |     |     \n";
+    cout<<" "<<board[1][0]<<"   | " <<board[1][1]<<"   |  "<<board[1][2]<<" \n";
+    cout<<"_____|_____|_____\n";
+    cout<<"     |     |     \n";
+    cout<<" "<<board[2][0]<<"   | " <<board[2][1]<<"   |  "<<board[2][2]<<" \n";
+    cout<<"     |     |     \n";
+}
 
-    cout<<"PLAYER - 1 [X]t PLAYER - 2 [O]nn";
-    cout<<"     |     |     \n";
-    cout<<" "<<board[0][0]<<"  | "<<board[0][1]<<"  |  "<<board[0][2]<<" \n";
-    cout<<"_____|_____|_____\n";
-    cout<<"     |     |     \n";
-    cout<<" "<<board[1][0]<<"  | "<<board[1][1]<<"  |  "<<board[1][2]<<" \n";
-    cout<<"_____|_____|_____\n";
-    cout<<"     |     |     \n";
-    cout<<"  "<<board[2][0]<<"  | "<<board[2][1]<<"  |  "<<board[2][2]<<" \n";
-    cout<<"     |     |     \n";
+int main(){
+    display_board();
+    ;
 }
 
 //Function to get the player input and update the board
