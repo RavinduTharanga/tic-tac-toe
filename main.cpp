@@ -22,26 +22,15 @@ void display_board(){
     cout<<"     |     |     \n";
 }
 
-int main(){
-    display_board();
-    ;
-}
-
-//Function to get the player input and update the board
-
 void player_turn(){
-    if(turn == 'X'){
-        cout<<"ntPlayer - 1 [X] turn : ";
+    if(turn == 'x'){
+        cout<<"Player - 1 [X] turn : ";
     }
-    else if(turn == 'O'){
-        cout<<"ntPlayer - 2 [O] turn : ";
-    }
-    //Taking input from user
-    //updating the board according to choice and reassigning the turn Start
+    else if (turn == 'o'){
+        cout<<"Player - 2 [O] turn : ";
 
+    }
     cin>> choice;
-
-    //switch case to get which row and column will be update
 
     switch(choice){
         case 1: row=0; column=0; break;
@@ -57,23 +46,23 @@ void player_turn(){
             cout<<"Invalid Move";
     }
 
-    if(turn == 'X' && board[row][column] != 'X' && board[row][column] != 'O'){
-        //updating the position for 'X' symbol if
-        //it is not already occupied
-        board[row][column] = 'X';
-        turn = 'O';
-    }else if(turn == 'O' && board[row][column] != 'X' && board[row][column] != 'O'){
+    if(turn == 'x' && board[row][column] != 'x' && board[row][column] != 'o'){
+        board[row][column] ='x';
+        trun == 'o';
+    }
+    }else if(turn == 'o' && board[row][column] != 'x' && board[row][column] != 'O'){
         //updating the position for 'O' symbol if
         //it is not already occupied
-        board[row][column] = 'O';
-        turn = 'X';
-    }else {
+        board[row][column] = 'o';
+        turn = 'x';
+    }
+    else {
         //if input position already filled
-        cout<<"Box already filled!n Please choose another!!nn";
+        cout<<"Box already filled!n Please choose another!";
         player_turn();
     }
-    /* Ends */
-    display_board();
+    
+
 }
 
 //Function to get the game status e.g. GAME WON, GAME DRAW GAME IN CONTINUE MODE
