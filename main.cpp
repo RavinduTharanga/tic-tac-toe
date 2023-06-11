@@ -78,7 +78,7 @@ bool gameover(){
     //Checking the game is in continue mode or not
     for(int i=0; i<3; i++)
     for(int j=0; j<3; j++)
-    if(board[i][j] != 'x' && board[i][j] != '0')
+    if(board[i][j] != 'x' && board[i][j] != 'O')
     return true;
 
     //Checking the if game already draw
@@ -88,19 +88,20 @@ bool gameover(){
 
 int main()
 {
-    cout<<"tttT I C K -- T A C -- T O E -- G A M Ettt";
-    cout<<"nttttFOR 2 PLAYERSnttt";
+    cout<<"T I C K -- T A C -- T O E -- G A M E\n";
+    cout<<"FOR 2 PLAYERS\n";
     while(gameover()){
         display_board();
         player_turn();
         gameover();
     }
     if(turn == 'x' && draw == false){
-        cout<<"nnCongratulations!Player with 'X' has won the game\n";
+        cout<<"Congratulations!Player with 'X' has won the game\n";
+        display_board();
     }
     else if(turn == 'o' && draw == false){
-        cout<<"nnCongratulations!Player with 'O' has won the game\n";
+        cout<<"Congratulations!Player with 'O' has won the game\n";
     }
     else
-    cout<<"nnGAME DRAW!!!nn";
+    cout<<"GAME DRAW!!!\n";
 } 
