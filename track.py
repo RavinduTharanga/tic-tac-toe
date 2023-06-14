@@ -1,285 +1,222 @@
+# https://github.com/ultralytics/ultralytics/issues/1429#issuecomment-1519239409
+
+from pathlib import Path
+import torch
 import argparse
-import mss
-import mss.tools
-import cv2
 import numpy as np
-# import pyautogui
-import time
-import pytesseract
-import sqlite3
+import cv2
+from types import SimpleNamespace
 
-def setup_db():
-    conn = sqlite3.connect('windows_events.sqlite')
-    c = conn.cursor()
+from boxmot.tracker_zoo import create_tracker
+from boxmot.utils import ROOT, WEIGHTS
+from boxmot.utils.checks import TestRequirements
+from boxmot.utils import logger as LOGGER
+from boxmot.utils.torch_utils import select_device
 
-    # Create table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS windows_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            x INTEGER,
-            y INTEGER,
-            width INTEGER,
-            height INTEGER,
-            window_name TEXT,
-            document_name TEXT,
-            event_name TEXT
+tr = TestRequirements()
+tr.check_packages(('ultralytics',))  # install
+
+from ultralytics.yolo.engine.model import YOLO, TASK_MAP
+
+from ultralytics.yolo.utils import SETTINGS, colorstr, ops, is_git_dir, IterableSimpleNamespace
+from ultralytics.yolo.utils.checks import check_imgsz, print_args
+from ultralytics.yolo.utils.files import increment_path
+from ultralytics.yolo.engine.results import Boxes
+from ultralytics.yolo.data.utils import VID_FORMATS
+
+from multi_yolo_backend import MultiYolo
+from utils import write_MOT_results
+
+
+def on_predict_start(predictor):
+    predictor.trackers = []
+    predictor.tracker_outputs = [None] * predictor.dataset.bs
+    predictor.args.tracking_config = \
+        ROOT /\
+        'boxmot' /\
+        opt.tracking_method /\
+        'configs' /\
+        (opt.tracking_method + '.yaml')
+    for i in range(predictor.dataset.bs):
+        tracker = create_tracker(
+            predictor.args.tracking_method,
+            predictor.args.tracking_config,
+            predictor.args.reid_model,
+            predictor.device,
+            predictor.args.half
         )
-    ''')
+        predictor.trackers.append(tracker)
 
-    conn.commit()
-    return conn
 
-def insert_event(conn, x, y, w, h, window_name, document_name, event_name):
-    c = conn.cursor()
+@torch.no_grad()
+def run(args):
     
-    # Insert a row of data
-    c.execute("INSERT INTO windows_events (timestamp, x, y, width, height, window_name, document_name, event_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-              (time.time(), x, y, w, h, window_name, document_name, event_name))
+    model = YOLO(args['yolo_model'] if 'v8' in str(args['yolo_model']) else 'yolov8n')
+    overrides = model.overrides.copy()
+    model.predictor = TASK_MAP[model.task][3](overrides=overrides, _callbacks=model.callbacks)
     
-    # Save (commit) the changes
-    conn.commit()
+    # extract task predictor
+    predictor = model.predictor
 
-def split_title(title):
-    parts = title.split('-')
-    window_name = parts[0].strip()
-    document_name = parts[1].strip() if len(parts) > 1 else ''
-    return window_name, document_name
+    # combine default predictor args with custom, preferring custom
+    combined_args = {**predictor.args.__dict__, **args}
+    # overwrite default args
+    predictor.args = IterableSimpleNamespace(**combined_args)
+    predictor.args.device = select_device(args['device'])
+    LOGGER.info(args)
 
-# Parse command-line arguments
-parser = argparse.ArgumentParser(description='Monitor Number')
-parser.add_argument('--monitor', type=int, default=0, help='Monitor number (starting from 0)')
-args = parser.parse_args()
-
-monitor_number = args.monitor
-
-# Load the templates
-template_inactive = cv2.imread('template_inactive.png', cv2.IMREAD_COLOR)
-template_inactive = cv2.cvtColor(template_inactive, cv2.COLOR_BGR2GRAY)
-
-template_active = cv2.imread('template_active.png', cv2.IMREAD_COLOR)
-template_active = cv2.cvtColor(template_active, cv2.COLOR_BGR2GRAY)
-
-# Create a dictionary to store trackers and their IDs
-trackers = {}
-
-# Create a dictionary to store tracker states (active or inactive)
-tracker_states = {}
-tracker_titles = {}
-
-# Initialize a counter for window IDs
-window_id = 1
-threshold = 0.8
-title_bar_height = 50
-
-conn = setup_db()
-
-# Check if templates have been correctly loaded
-if template_inactive is None:
-    print("Could not open or find the inactive template")
-elif template_active is None:
-    print("Could not open or find the active template")
-else:
-    start_time = time.time()
-    last_detection_time = time.time()
-    # Detection interval in seconds
-    detection_interval = 1.0  # adjust as needed
-
-    # Create an instance of mss
-    sct = mss.mss()
-
-    # Get information of all monitors
-    monitors = sct.monitors
-
-    # Choose a monitor (index 1 is the first monitor, index 2 is the second, etc.)
-    monitor = monitors[monitor_number]
+    # setup source and model
+    if not predictor.model:
+        predictor.setup_model(model=model.model, verbose=False)
+    predictor.setup_source(predictor.args.source)
     
-    while True:
-        # Capture screenshot
-        # screenshot = pyautogui.screenshot()
-        screenshot = sct.grab(monitor)
-        # Convert the image into numpy array representation
-        frame = np.array(screenshot)
-        # Convert the BGR image into RGB image
-        #frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    predictor.args.imgsz = check_imgsz(predictor.args.imgsz, stride=model.model.stride, min_dim=2)  # check image size
+    predictor.save_dir = increment_path(Path(predictor.args.project) / predictor.args.name, exist_ok=predictor.args.exist_ok)
+    
+    # Check if save_dir/ label file exists
+    if predictor.args.save or predictor.args.save_txt:
+        (predictor.save_dir / 'labels' if predictor.args.save_txt else predictor.save_dir).mkdir(parents=True, exist_ok=True)
+    # Warmup model
+    if not predictor.done_warmup:
+        predictor.model.warmup(imgsz=(1 if predictor.model.pt or predictor.model.triton else predictor.dataset.bs, 3, *predictor.imgsz))
+        predictor.done_warmup = True
+    predictor.seen, predictor.windows, predictor.batch, predictor.profilers = 0, [], None, (ops.Profile(), ops.Profile(), ops.Profile(), ops.Profile())
+    predictor.add_callback('on_predict_start', on_predict_start)
+    predictor.run_callbacks('on_predict_start')
+    model = MultiYolo(
+        model=model.predictor.model if 'v8' in str(args['yolo_model']) else args['yolo_model'],
+        device=predictor.device,
+        args=predictor.args
+    )
+    for frame_idx, batch in enumerate(predictor.dataset):
+        predictor.run_callbacks('on_predict_batch_start')
+        predictor.batch = batch
+        path, im0s, vid_cap, s = batch
+        visualize = increment_path(save_dir / Path(path[0]).stem, exist_ok=True, mkdir=True) if predictor.args.visualize and (not predictor.dataset.source_type.tensor) else False
 
-        # Update location of the tracked windows
-        # In the tracking block:
-        for id, tracker in list(trackers.items()):
-            success, box = tracker.update(frame)
-            if success:
-                p1 = (int(box[0]), int(box[1]))
-                p2 = (int(box[0] + box[2]), int(box[1] + box[3]))
+        n = len(im0s)
+        predictor.results = [None] * n
+        
+        # Preprocess
+        with predictor.profilers[0]:
+            im = predictor.preprocess(im0s)
 
-                cv2.rectangle(frame, p1, p2, (0,255,0), 2, 1)
+        # Inference
+        with predictor.profilers[1]:
+            preds = model(im, im0s)
 
-                # Get region of interest
-                if (int(box[0]) >= 0 and int(box[1]) >= 0 and 
-                    int(box[2]) > 0 and int(box[3]) > 0 and 
-                    int(box[1] + box[3]) <= frame.shape[0] and 
-                    int(box[0] + box[2]) <= frame.shape[1]): 
+        # Postprocess moved to MultiYolo
+        with predictor.profilers[2]:
+            predictor.results = model.postprocess(path, preds, im, im0s, predictor)
+        predictor.run_callbacks('on_predict_postprocess_end')
+        
+        # Visualize, save, write results
+        n = len(im0s)
+        for i in range(n):
+            
+            if predictor.dataset.source_type.tensor:  # skip write, show and plot operations if input is raw tensor
+                continue
+            p, im0 = path[i], im0s[i].copy()
+            p = Path(p)
+            
+            with predictor.profilers[3]:
+                # get raw bboxes tensor
+                dets = predictor.results[i].boxes.data
+                # get tracker predictions
+                predictor.tracker_outputs[i] = predictor.trackers[i].update(dets.cpu().detach().numpy(), im0)
+            predictor.results[i].speed = {
+                'preprocess': predictor.profilers[0].dt * 1E3 / n,
+                'inference': predictor.profilers[1].dt * 1E3 / n,
+                'postprocess': predictor.profilers[2].dt * 1E3 / n,
+                'tracking': predictor.profilers[3].dt * 1E3 / n
+            }
 
-                    roi = frame[int(box[1]):int(box[1] + box[3]), int(box[0]):int(box[0] + box[2])]
-                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-                    # Check if ROI is large enough for template matching
-                    if roi_gray.shape[0] >= template_inactive.shape[0] and roi_gray.shape[1] >= template_inactive.shape[1]:
-                        res_inactive = cv2.matchTemplate(roi_gray, template_inactive, cv2.TM_CCOEFF_NORMED)
-                        loc_inactive = np.where(res_inactive >= threshold)
-
-                    if roi_gray.shape[0] >= template_active.shape[0] and roi_gray.shape[1] >= template_active.shape[1]:
-                        res_active = cv2.matchTemplate(roi_gray, template_active, cv2.TM_CCOEFF_NORMED)
-                        loc_active = np.where(res_active >= threshold)
-
-                    if loc_inactive is not None and len(loc_inactive[0]) > 0:
-                        tracker_states[id] = "INACTIVE"
-
-                    elif loc_active is not None and len(loc_active[0]) > 0:
-                        tracker_states[id] = "ACTIVE"
-
-
-
-                    
+            # filter boxes masks and pose results by tracking results
+            model.filter_results(i, predictor)
+            # overwrite bbox results with tracker predictions
+            model.overwrite_results(i, im0.shape[:2], predictor)
+            
+            # write inference results to a file or directory   
+            if predictor.args.verbose or predictor.args.save or predictor.args.save_txt or predictor.args.show:
+                s += predictor.write_results(i, predictor.results, (p, im, im0))
+                predictor.txt_path = Path(predictor.txt_path)
+                
+                # write MOT specific results
+                if predictor.args.source.endswith(VID_FORMATS):
+                    predictor.MOT_txt_path = predictor.txt_path.parent / p.stem
                 else:
-                    pass
-                    # print("Error: Bounding box is out of frame dimensions or has invalid dimensions.")
-
-
-                # Retrieve the title from the dictionary
-                title = tracker_titles[id]
-
-                # The rest of the code remains the same...
-                window_name, document_name = split_title(title)
-
-                cv2.putText(frame, 'ID: ' + str(id) + ' - ' + tracker_states[id] + " Title: " + title, p1, cv2.FONT_HERSHEY_SIMPLEX, 0.9, (36,255,12), 2)
-
-            else:
-                # remove tracker if it's not successful
-                del trackers[id]
-                del tracker_states[id]  # also remove from tracker_states
-                 # Insert event into database
-                window_name, document_name = split_title(title)
-                insert_event(conn, int(box[0]), int(box[1]), int(box[2]), int(box[3]), window_name, document_name, 'APPLICATION_CLOSE')
-
-
-
-        # Detect new windows if no windows are currently being tracked
-        # if not trackers:
-        if time.time() - last_detection_time > detection_interval:
-            last_detection_time = time.time()
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-            contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-            for contour in contours:
-                # get rectangle bounding contour
-                [x, y, w, h] = cv2.boundingRect(contour)
-
-                # discard areas that are too large
-                if h > 500 and w > 500:
-                    continue
-
-                # discard areas that are too small
-                if h < 40 or w < 40:
-                    continue
-
-                # Assume this window is new
-                is_new_window = True
-
-                # Check if this window overlaps with a tracked window
-                for id, tracker in trackers.items():
-                    # box = tracker.get_position()
-                    success, box = tracker.update(frame)
-                    if success:
-                        # The rectangle of the tracked window
-                        tracked_rect = (int(box[0]), int(box[1]), int(box[0] + box[2]), int(box[1] + box[3]))
-
-                        # The rectangle of the new window
-                        new_rect = (x, y, x + w, y + h)
-
-                        # Check if the rectangles overlap
-                        # The rectangles overlap if the intersection area is more than half of the new window area
-                        # and more than half of the tracked window area
-                        x_overlap = max(0, min(tracked_rect[2], new_rect[2]) - max(tracked_rect[0], new_rect[0]))
-                        y_overlap = max(0, min(tracked_rect[3], new_rect[3]) - max(tracked_rect[1], new_rect[1]))
-                        overlap_area = x_overlap * y_overlap
-                        if overlap_area > 0.5 * w * h or overlap_area > 0.5 * box[2] * box[3]:
-                            is_new_window = False
-                            break
-
-                if not is_new_window:
-                    continue
-
-                # check if the window has the OS action buttons
-                roi = frame[y:y + h, x:x + w]
-                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-                loc_inactive = loc_active = None
-
-                # Check if ROI is large enough for template matching
-                if roi_gray.shape[0] >= template_inactive.shape[0] and roi_gray.shape[1] >= template_inactive.shape[1]:
-                    res_inactive = cv2.matchTemplate(roi_gray, template_inactive, cv2.TM_CCOEFF_NORMED)
-                    loc_inactive = np.where(res_inactive >= threshold)
-
-                if roi_gray.shape[0] >= template_active.shape[0] and roi_gray.shape[1] >= template_active.shape[1]:
-                    res_active = cv2.matchTemplate(roi_gray, template_active, cv2.TM_CCOEFF_NORMED)
-                    loc_active = np.where(res_active >= threshold)
-
-
-                # In the detection block:
-                if loc_inactive is not None and len(loc_inactive[0]) > 0:
-                    # add a tracker for the new window
-                    tracker = cv2.legacy.TrackerMOSSE_create()
-                    tracker.init(frame, (x, y, w, h))
-                    trackers[window_id] = tracker
-                    tracker_states[window_id] = "INACTIVE"  # set tracker state
+                    # append folder name containing current img
+                    predictor.MOT_txt_path = predictor.txt_path.parent / p.parent.name
                     
-                    # Extract the title bar of the window
-                    title_bar = frame[y:y + title_bar_height, x:x + w]
+                if predictor.tracker_outputs[i].size != 0 and predictor.args.save_txt:
+                    write_MOT_results(
+                        predictor.MOT_txt_path,
+                        predictor.results[i],
+                        frame_idx,
+                        i,
+                    )
 
-                    # Convert the title bar to grayscale
-                    title_bar_gray = cv2.cvtColor(title_bar, cv2.COLOR_BGR2GRAY)
+            # display an image in a window using OpenCV imshow()
+            if predictor.args.show and predictor.plotted_img is not None:
+                predictor.show(p.parent)
 
-                    # Use Tesseract to do OCR on the title bar
-                    title = pytesseract.image_to_string(title_bar_gray)
+            # save video predictions
+            if predictor.args.save and predictor.plotted_img is not None:
+                predictor.save_preds(vid_cap, i, str(predictor.save_dir / p.name))
 
-                    # Store the title in the dictionary
-                    tracker_titles[window_id] = title
+        predictor.run_callbacks('on_predict_batch_end')
 
-                    window_name, document_name = split_title(title)
-                    insert_event(conn, x, y, w, h, window_name, document_name, 'APPLICATION_OPEN')
-                    window_id += 1
+        # print time (inference-only)
+        if predictor.args.verbose:
+            LOGGER.info(f'{s}YOLO {predictor.profilers[1].dt * 1E3:.1f}ms, TRACKING {predictor.profilers[3].dt * 1E3:.1f}ms')
 
-                elif loc_active is not None and len(loc_active[0]) > 0:
-                    # add a tracker for the new window
-                    tracker = cv2.legacy.TrackerMOSSE_create()
-                    tracker.init(frame, (x, y, w, h))
-                    trackers[window_id] = tracker
-                    tracker_states[window_id] = "ACTIVE"  # set tracker state
+    # Release assets
+    if isinstance(predictor.vid_writer[-1], cv2.VideoWriter):
+        predictor.vid_writer[-1].release()  # release final video writer
 
-                    # Extract the title bar of the window
-                    title_bar = frame[y:y + title_bar_height, x:x + w]
+    # Print results
+    if predictor.args.verbose and predictor.seen:
+        t = tuple(x.t / predictor.seen * 1E3 for x in predictor.profilers)  # speeds per image
+        LOGGER.info(f'Speed: %.1fms preprocess, %.1fms inference, %.1fms postprocess, %.1fms tracking per image at shape '
+                    f'{(1, 3, *predictor.args.imgsz)}' % t)
+    if predictor.args.save or predictor.args.save_txt or predictor.args.save_crop:
+        nl = len(list(predictor.save_dir.glob('labels/*.txt')))  # number of labels
+        s = f"\n{nl} label{'s' * (nl > 1)} saved to {predictor.save_dir / 'labels'}" if predictor.args.save_txt else ''
+        LOGGER.info(f"Results saved to {colorstr('bold', predictor.save_dir)}{s}")
 
-                    # Convert the title bar to grayscale
-                    title_bar_gray = cv2.cvtColor(title_bar, cv2.COLOR_BGR2GRAY)
+    predictor.run_callbacks('on_predict_end')
+    
 
-                    # Use Tesseract to do OCR on the title bar
-                    title = pytesseract.image_to_string(title_bar_gray)
+def parse_opt():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--yolo-model', type=Path, default=WEIGHTS / 'yolov8n.pt', help='model.pt path(s)')
+    parser.add_argument('--reid-model', type=Path, default=WEIGHTS / 'mobilenetv2_x1_4_dukemtmcreid.pt')
+    parser.add_argument('--tracking-method', type=str, default='deepocsort', help='deepocsort, botsort, strongsort, ocsort, bytetrack')
+    parser.add_argument('--source', type=str, default='0', help='file/dir/URL/glob, 0 for webcam')  
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
+    parser.add_argument('--conf', type=float, default=0.5, help='confidence threshold')
+    parser.add_argument('--iou', type=float, default=0.7, help='intersection over union (IoU) threshold for NMS')
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--show', action='store_true', help='display tracking video results')
+    parser.add_argument('--save', action='store_true', help='save video tracking results')
+    # # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
+    parser.add_argument('--project', default=ROOT / 'runs' / 'track', help='save results to project/name')
+    parser.add_argument('--name', default='exp', help='save results to project/name')
+    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
+    parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--hide-label', action='store_true', help='hide labels when show')
+    parser.add_argument('--hide-conf', action='store_true', help='hide confidences when show')
+    parser.add_argument('--save-txt', action='store_true', help='save tracking results in a txt file')
+    opt = parser.parse_args()
+    return opt
 
-                    # Store the title in the dictionary
-                    tracker_titles[window_id] = title
-                    
-                    window_name, document_name = split_title(title)
-                    insert_event(conn, x, y, w, h, window_name, document_name, 'APPLICATION_OPEN')
-                    window_id += 1
 
-        # Display the resulting frame
-        cv2.imshow('Screen Capture', frame)
+def main(opt):
+    run(vars(opt))
 
-        # Break the loop on 'q' press or after 60 seconds
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
-    cv2.destroyAllWindows()
+if __name__ == "__main__":
+    opt = parse_opt()
+    main(opt)
