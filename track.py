@@ -220,3 +220,38 @@ def main(opt):
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
+
+    import cv2
+import numpy as np
+
+# Load the template
+template = cv2.imread('template.jpg',0)
+w, h = template.shape[::-1]
+
+# Inside your loop over bounding boxes
+for i in range(n):
+    # Crop the region of interest (ROI) using the bounding box coordinates
+    p, im0 = path[i], im0s[i].copy()
+    p = Path(p)
+    
+    with predictor.profilers[3]:
+        # Get raw bboxes tensor
+        dets = predictor.results[i].boxes.data
+
+        # Get tracker predictions
+        predictor.tracker_outputs[i] = predictor.trackers[i].update(dets.cpu().detach().numpy(), im0)
+        # Now you can crop the ROI from the image (assuming dets gives you xmin, ymin, xmax, ymax)
+        xmin, ymin, xmax, ymax = dets[0], dets[1], dets[2], dets[3]
+        roi = im0[ymin:ymax, xmin:xmax]
+
+        # Perform template matching on the ROI
+        res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+        # Check if the template match is above a certain threshold
+        threshold = 0.8
+        if max_val >= threshold:
+            # Do something with the match
+            top_left = max_loc
+            bottom_right = (top_left[0] + w, top_left[1] + h)
+            cv2.rectangle(roi, top_left, bottom_right, 255, 2)
