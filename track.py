@@ -111,38 +111,44 @@ def run(args):
         predictor.run_callbacks('on_predict_postprocess_end')
         
         # Visualize, save, write results
-        n = len(im0s)
-        # Load the template
-        template = cv2.imread('template.jpg',0)
-        w, h = template.shape[::-1]
 
-        # Inside your loop over bounding boxes
+
+        n = len(im0s)
         for i in range(n):
-            # Crop the region of interest (ROI) using the bounding box coordinates
+            if predictor.dataset.source_type.tensor:  # skip write, show and plot operations if input is raw tensor
+                continue
             p, im0 = path[i], im0s[i].copy()
             p = Path(p)
 
+            # Template matching
+            template = cv2.imread('/Users/mymac/Desktop/yolo_tracking/examples/template_active.png', 0)
+            w, h = template.shape[::-1]
+
+            # Load the input image and convert to grayscale if it is not
+            if len(im0.shape) == 3:
+                im0_gray = cv2.cvtColor(im0, cv2.COLOR_BGR2GRAY)
+            else:
+                im0_gray = im0
+
+            # Apply template matching
+            res = cv2.matchTemplate(im0_gray, template, cv2.TM_CCOEFF_NORMED)
+
+            threshold = 0.8
+            loc = np.where(res >= threshold)
+            for pt in zip(*loc[::-1]):
+                cv2.rectangle(im0, pt, (pt[0] + w, pt[1] + h), (0,0,255), 2)
+
             with predictor.profilers[3]:
-                # Get raw bboxes tensor
+                # get raw bboxes tensor
                 dets = predictor.results[i].boxes.data
-
-                # Get tracker predictions
+                # get tracker predictions
                 predictor.tracker_outputs[i] = predictor.trackers[i].update(dets.cpu().detach().numpy(), im0)
-                # Now you can crop the ROI from the image (assuming dets gives you xmin, ymin, xmax, ymax)
-                xmin, ymin, xmax, ymax = dets[0], dets[1], dets[2], dets[3]
-                roi = im0[ymin:ymax, xmin:xmax]
-
-                # Perform template matching on the ROI
-                res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-
-                # Check if the template match is above a certain threshold
-                threshold = 0.8
-                if max_val >= threshold:
-                    # Do something with the match
-                    top_left = max_loc
-                    bottom_right = (top_left[0] + w, top_left[1] + h)
-                    cv2.rectangle(roi, top_left, bottom_right, 255, 2)
+            predictor.results[i].speed = {
+                'preprocess': predictor.profilers[0].dt * 1E3 / n,
+                'inference': predictor.profilers[1].dt * 1E3 / n,
+                'postprocess': predictor.profilers[2].dt * 1E3 / n,
+                'tracking': predictor.profilers[3].dt * 1E3 / n
+            }
 
             # filter boxes masks and pose results by tracking results
             model.filter_results(i, predictor)
@@ -168,6 +174,8 @@ def run(args):
                         frame_idx,
                         i,
                     )
+
+
 
             # display an image in a window using OpenCV imshow()
             if predictor.args.show and predictor.plotted_img is not None:
@@ -233,6 +241,3 @@ def main(opt):
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
-
-
-
