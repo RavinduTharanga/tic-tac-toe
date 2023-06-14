@@ -124,6 +124,12 @@ def run(args):
             template = cv2.imread('/Users/mymac/Desktop/yolo_tracking/examples/template_active.png', 0)
             w, h = template.shape[::-1]
 
+            # Convert the input image to grayscale if it is not already
+            if len(im0.shape) == 3:
+                im0_gray = cv2.cvtColor(im0, cv2.COLOR_BGR2GRAY)
+            else:
+                im0_gray = im0
+
             with predictor.profilers[3]:
                 # get raw bboxes tensor
                 dets = predictor.results[i].boxes.data
@@ -140,30 +146,28 @@ def run(args):
             model.filter_results(i, predictor)
 
             # for each bounding box detected in image
-            # for each bounding box detected in image
             for bbox in dets.cpu().detach().numpy():
                 x, y, x2, y2 = map(int, bbox[:4])
-    #...
 
-                # get region of interest
-                roi = im0[y:y2, x:x2]
-                # convert to grayscale if it is not
-                if len(roi.shape) == 3:
-                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                # Extract ROI from the grayscale image
+                roi_gray = im0_gray[y:y2, x:x2]
+
+                # Check if ROI is larger than the template
+                if roi_gray.shape[0] >= template.shape[0] and roi_gray.shape[1] >= template.shape[1]:
+
+                    # Now apply template matching
+                    res = cv2.matchTemplate(roi_gray, template, cv2.TM_CCOEFF_NORMED)
+
+                    threshold = 0.8
+                    loc = np.where(res >= threshold)
+                    for pt in zip(*loc[::-1]):
+                        cv2.rectangle(im0, (x+pt[0], y+pt[1]), (x+pt[0] + w, y+pt[1] + h), (0,0,255), 2)
                 else:
-                    roi_gray = roi
-
-                # Apply template matching
-                res = cv2.matchTemplate(roi_gray, template, cv2.TM_CCOEFF_NORMED)
-
-                threshold = 0.8
-                loc = np.where(res >= threshold)
-                for pt in zip(*loc[::-1]):
-                    cv2.rectangle(im0, (x+pt[0], y+pt[1]), (x+pt[0] + w, y+pt[1] + h), (0,0,255), 2)
+                    print(f"ROI is smaller than the template. Skipping template matching for bbox {bbox}.")
 
             # overwrite bbox results with tracker predictions
             model.overwrite_results(i, im0.shape[:2], predictor)
-            
+
             # write inference results to a file or directory   
             if predictor.args.verbose or predictor.args.save or predictor.args.save_txt or predictor.args.show:
                 s += predictor.write_results(i, predictor.results, (p, im, im0))
@@ -175,6 +179,9 @@ def run(args):
                 else:
                     # append folder name containing current img
                     predictor.MOT_txt_path = predictor.txt_path.parent / p.parent.name
+            
+       
+
                     
                 if predictor.tracker_outputs[i].size != 0 and predictor.args.save_txt:
                     write_MOT_results(
