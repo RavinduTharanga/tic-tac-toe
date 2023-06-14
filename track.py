@@ -124,20 +124,6 @@ def run(args):
             template = cv2.imread('/Users/mymac/Desktop/yolo_tracking/examples/template_active.png', 0)
             w, h = template.shape[::-1]
 
-            # Load the input image and convert to grayscale if it is not
-            if len(im0.shape) == 3:
-                im0_gray = cv2.cvtColor(im0, cv2.COLOR_BGR2GRAY)
-            else:
-                im0_gray = im0
-
-            # Apply template matching
-            res = cv2.matchTemplate(im0_gray, template, cv2.TM_CCOEFF_NORMED)
-
-            threshold = 0.8
-            loc = np.where(res >= threshold)
-            for pt in zip(*loc[::-1]):
-                cv2.rectangle(im0, pt, (pt[0] + w, pt[1] + h), (0,0,255), 2)
-
             with predictor.profilers[3]:
                 # get raw bboxes tensor
                 dets = predictor.results[i].boxes.data
@@ -152,6 +138,29 @@ def run(args):
 
             # filter boxes masks and pose results by tracking results
             model.filter_results(i, predictor)
+
+            # for each bounding box detected in image
+            # for each bounding box detected in image
+            for bbox in dets.cpu().detach().numpy():
+                x, y, x2, y2 = map(int, bbox[:4])
+    #...
+
+                # get region of interest
+                roi = im0[y:y2, x:x2]
+                # convert to grayscale if it is not
+                if len(roi.shape) == 3:
+                    roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                else:
+                    roi_gray = roi
+
+                # Apply template matching
+                res = cv2.matchTemplate(roi_gray, template, cv2.TM_CCOEFF_NORMED)
+
+                threshold = 0.8
+                loc = np.where(res >= threshold)
+                for pt in zip(*loc[::-1]):
+                    cv2.rectangle(im0, (x+pt[0], y+pt[1]), (x+pt[0] + w, y+pt[1] + h), (0,0,255), 2)
+
             # overwrite bbox results with tracker predictions
             model.overwrite_results(i, im0.shape[:2], predictor)
             
@@ -174,6 +183,7 @@ def run(args):
                         frame_idx,
                         i,
                     )
+
 
 
 
